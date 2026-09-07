@@ -1,7 +1,10 @@
 # main.py
-# Versione: v26
+# Versione: v28
 # Data ultima modifica: 2026-09-07
 # Descrizione: Efficienza basata su polarità - soglia applicata correttamente
+# Correzioni v28: carica e media su tutta finestra temporale senza sottrazione bck
+#                 amp_max e amp_min su tutta finestra temporale senza sottrazione bck
+#                 dev_std su tutta finestra temporale senza sottrazione bck
 
 import os
 import yaml
@@ -160,8 +163,8 @@ class AnalizzatoreFormaOnda:
                 'amp_max': 0.0,
                 'amp_min': 0.0,
                 'carica': 0.0,
-                'pedestal': 0.0,
                 'media': 0.0,
+                'pedestal': 0.0,
                 'dev_std': 0.0,
                 'eff_V': 0.0,
                 't_eff_V': 0.0,
@@ -206,8 +209,8 @@ class AnalizzatoreFormaOnda:
                 'amp_max': 0.0,
                 'amp_min': 0.0,
                 'carica': 0.0,
-                'pedestal': 0.0,
                 'media': 0.0,
+                'pedestal': 0.0,
                 'dev_std': 0.0,
                 'eff_V': 0.0,
                 't_eff_V': 0.0,
@@ -236,20 +239,25 @@ class AnalizzatoreFormaOnda:
         else:
             q_tot = 0.0
         
-        # Calcola parametri nel segnale originale (senza sottrazione)
-        amp_max = float(np.max(tensione_filtrata))
-        amp_min = float(np.min(tensione_filtrata))
+        # **CARICA**: integrale su TUTTA la finestra temporale SENZA sottrazione bck / Z
+        if len(tempo) > 1:
+            carica = float(np.trapz(tensione, tempo) / Z)
+        else:
+            carica = 0.0
         
-        # Carica: integrale sul segnale corretto (trapezoidale) / Z
-        carica = float(np.trapz(tensione_corretta, tempo_filtrato) / Z)
+        # **MEDIA**: media su TUTTA la finestra temporale SENZA sottrazione bck
+        media = float(np.mean(tensione))
         
         # **PEDESTAL**: media dei primi 10% di TUTTA la forma d'onda
         n_pedestal = max(1, len(tensione) // 10)
         pedestal = float(np.mean(tensione[:n_pedestal]))
         
-        # Media e deviazione standard nel segnale
-        media = float(np.mean(tensione_filtrata))
-        dev_std = float(np.std(tensione_filtrata))
+        # **AMP_MAX e AMP_MIN**: ampiezza su TUTTA la finestra temporale SENZA sottrazione bck
+        amp_max = float(np.max(tensione))
+        amp_min = float(np.min(tensione))
+        
+        # **DEV_STD**: deviazione standard su TUTTA la finestra temporale SENZA sottrazione bck
+        dev_std = float(np.std(tensione))
         
         # **CALCOLA EFFICIENZE E TEMPI** (considero la polarità)
         if polarita == "negative":
@@ -303,8 +311,8 @@ class AnalizzatoreFormaOnda:
             'amp_max': amp_max,
             'amp_min': amp_min,
             'carica': carica,
-            'pedestal': pedestal,
             'media': media,
+            'pedestal': pedestal,
             'dev_std': dev_std,
             'eff_V': eff_V,
             't_eff_V': t_eff_V,
@@ -424,8 +432,8 @@ class AnalizzatoreDati:
                 'amp_max': np.array([0.0], dtype=np.float32),
                 'amp_min': np.array([0.0], dtype=np.float32),
                 'carica': np.array([0.0], dtype=np.float32),
-                'pedestal': np.array([0.0], dtype=np.float32),
                 'media': np.array([0.0], dtype=np.float32),
+                'pedestal': np.array([0.0], dtype=np.float32),
                 'dev_std': np.array([0.0], dtype=np.float32),
                 'eff_V': np.array([0.0], dtype=np.float32),
                 't_eff_V': np.array([0.0], dtype=np.float32),
@@ -487,8 +495,8 @@ class AnalizzatoreDati:
                     params[num_canale]['amp_max'][0] = p['amp_max']
                     params[num_canale]['amp_min'][0] = p['amp_min']
                     params[num_canale]['carica'][0] = p['carica']
-                    params[num_canale]['pedestal'][0] = p['pedestal']
                     params[num_canale]['media'][0] = p['media']
+                    params[num_canale]['pedestal'][0] = p['pedestal']
                     params[num_canale]['dev_std'][0] = p['dev_std']
                     params[num_canale]['eff_V'][0] = p['eff_V']
                     params[num_canale]['t_eff_V'][0] = p['t_eff_V']
