@@ -1,8 +1,9 @@
 # main.py
-# Versione: v28
-# Data ultima modifica: 2026-09-07
+# Versione: v29
+# Data ultima modifica: 2026-09-08
 # Descrizione: Efficienza basata su polarità - soglia applicata correttamente
-# Correzioni v28: carica e media su tutta finestra temporale senza sottrazione bck
+# Correzioni v29: aggiunto tmax (tempo di vmax) e tmin (tempo di vmin)
+#                 carica e media su tutta finestra temporale senza sottrazione bck
 #                 amp_max e amp_min su tutta finestra temporale senza sottrazione bck
 #                 dev_std su tutta finestra temporale senza sottrazione bck
 
@@ -157,6 +158,8 @@ class AnalizzatoreFormaOnda:
                 'bck_sig': 0.0,
                 'vmax': 0.0,
                 'vmin': 0.0,
+                'tmax': 0.0,
+                'tmin': 0.0,
                 'q_bck': 0.0,
                 'q_sig': 0.0,
                 'q_tot': 0.0,
@@ -203,6 +206,8 @@ class AnalizzatoreFormaOnda:
                 'bck_sig': bck_sig,
                 'vmax': 0.0,
                 'vmin': 0.0,
+                'tmax': 0.0,
+                'tmin': 0.0,
                 'q_bck': q_bck,
                 'q_sig': 0.0,
                 'q_tot': 0.0,
@@ -225,6 +230,12 @@ class AnalizzatoreFormaOnda:
         # Calcola Vmax e Vmin sul segnale corretto (intervallo [tinf, tsup])
         vmax = float(np.max(tensione_corretta))
         vmin = float(np.min(tensione_corretta))
+        
+        # **TMAX e TMIN**: tempo associato a vmax e vmin
+        idx_vmax = int(np.argmax(tensione_corretta))
+        idx_vmin = int(np.argmin(tensione_corretta))
+        tmax = float(tempo_filtrato[idx_vmax])
+        tmin = float(tempo_filtrato[idx_vmin])
         
         # **CARICA SEGNALE**: q_sig tra tinf e tsup (dopo sottrazione bck) / Z
         q_sig = float(np.trapz(tensione_corretta, tempo_filtrato) / Z)
@@ -305,6 +316,8 @@ class AnalizzatoreFormaOnda:
             'bck_sig': bck_sig,
             'vmax': vmax,
             'vmin': vmin,
+            'tmax': tmax,
+            'tmin': tmin,
             'q_bck': q_bck,
             'q_sig': q_sig,
             'q_tot': q_tot,
@@ -426,6 +439,8 @@ class AnalizzatoreDati:
                 'bck_sig': np.array([0.0], dtype=np.float32),
                 'vmax': np.array([0.0], dtype=np.float32),
                 'vmin': np.array([0.0], dtype=np.float32),
+                'tmax': np.array([0.0], dtype=np.float32),
+                'tmin': np.array([0.0], dtype=np.float32),
                 'q_bck': np.array([0.0], dtype=np.float32),
                 'q_sig': np.array([0.0], dtype=np.float32),
                 'q_tot': np.array([0.0], dtype=np.float32),
@@ -489,6 +504,8 @@ class AnalizzatoreDati:
                     params[num_canale]['bck_sig'][0] = p['bck_sig']
                     params[num_canale]['vmax'][0] = p['vmax']
                     params[num_canale]['vmin'][0] = p['vmin']
+                    params[num_canale]['tmax'][0] = p['tmax']
+                    params[num_canale]['tmin'][0] = p['tmin']
                     params[num_canale]['q_bck'][0] = p['q_bck']
                     params[num_canale]['q_sig'][0] = p['q_sig']
                     params[num_canale]['q_tot'][0] = p['q_tot']
