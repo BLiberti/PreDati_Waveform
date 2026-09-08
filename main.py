@@ -1,11 +1,10 @@
 # main.py
-# Versione: v29
+# Versione: v30
 # Data ultima modifica: 2026-09-08
 # Descrizione: Efficienza basata su polarità - soglia applicata correttamente
-# Correzioni v29: aggiunto tmax (tempo di vmax) e tmin (tempo di vmin)
-#                 carica e media su tutta finestra temporale senza sottrazione bck
-#                 amp_max e amp_min su tutta finestra temporale senza sottrazione bck
-#                 dev_std su tutta finestra temporale senza sottrazione bck
+# v30: rimossi carica, media, pedestal, amp_max, amp_min, dev_std
+#      mantenuti: bck, bck_sig, vmax, vmin, tmax, tmin, q_bck, q_sig, q_tot
+#                 eff_V, t_eff_V, eff_Q, eff_5rm, t_eff_5rm
 
 import os
 import yaml
@@ -163,12 +162,6 @@ class AnalizzatoreFormaOnda:
                 'q_bck': 0.0,
                 'q_sig': 0.0,
                 'q_tot': 0.0,
-                'amp_max': 0.0,
-                'amp_min': 0.0,
-                'carica': 0.0,
-                'media': 0.0,
-                'pedestal': 0.0,
-                'dev_std': 0.0,
                 'eff_V': 0.0,
                 't_eff_V': 0.0,
                 'eff_Q': 0.0,
@@ -211,12 +204,6 @@ class AnalizzatoreFormaOnda:
                 'q_bck': q_bck,
                 'q_sig': 0.0,
                 'q_tot': 0.0,
-                'amp_max': 0.0,
-                'amp_min': 0.0,
-                'carica': 0.0,
-                'media': 0.0,
-                'pedestal': 0.0,
-                'dev_std': 0.0,
                 'eff_V': 0.0,
                 't_eff_V': 0.0,
                 'eff_Q': 0.0,
@@ -249,26 +236,6 @@ class AnalizzatoreFormaOnda:
             q_tot = float(np.trapz(tensione_tot_corretta, tempo_tot) / Z)
         else:
             q_tot = 0.0
-        
-        # **CARICA**: integrale su TUTTA la finestra temporale SENZA sottrazione bck / Z
-        if len(tempo) > 1:
-            carica = float(np.trapz(tensione, tempo) / Z)
-        else:
-            carica = 0.0
-        
-        # **MEDIA**: media su TUTTA la finestra temporale SENZA sottrazione bck
-        media = float(np.mean(tensione))
-        
-        # **PEDESTAL**: media dei primi 10% di TUTTA la forma d'onda
-        n_pedestal = max(1, len(tensione) // 10)
-        pedestal = float(np.mean(tensione[:n_pedestal]))
-        
-        # **AMP_MAX e AMP_MIN**: ampiezza su TUTTA la finestra temporale SENZA sottrazione bck
-        amp_max = float(np.max(tensione))
-        amp_min = float(np.min(tensione))
-        
-        # **DEV_STD**: deviazione standard su TUTTA la finestra temporale SENZA sottrazione bck
-        dev_std = float(np.std(tensione))
         
         # **CALCOLA EFFICIENZE E TEMPI** (considero la polarità)
         if polarita == "negative":
@@ -321,12 +288,6 @@ class AnalizzatoreFormaOnda:
             'q_bck': q_bck,
             'q_sig': q_sig,
             'q_tot': q_tot,
-            'amp_max': amp_max,
-            'amp_min': amp_min,
-            'carica': carica,
-            'media': media,
-            'pedestal': pedestal,
-            'dev_std': dev_std,
             'eff_V': eff_V,
             't_eff_V': t_eff_V,
             'eff_Q': eff_Q,
@@ -444,12 +405,6 @@ class AnalizzatoreDati:
                 'q_bck': np.array([0.0], dtype=np.float32),
                 'q_sig': np.array([0.0], dtype=np.float32),
                 'q_tot': np.array([0.0], dtype=np.float32),
-                'amp_max': np.array([0.0], dtype=np.float32),
-                'amp_min': np.array([0.0], dtype=np.float32),
-                'carica': np.array([0.0], dtype=np.float32),
-                'media': np.array([0.0], dtype=np.float32),
-                'pedestal': np.array([0.0], dtype=np.float32),
-                'dev_std': np.array([0.0], dtype=np.float32),
                 'eff_V': np.array([0.0], dtype=np.float32),
                 't_eff_V': np.array([0.0], dtype=np.float32),
                 'eff_Q': np.array([0.0], dtype=np.float32),
@@ -509,12 +464,6 @@ class AnalizzatoreDati:
                     params[num_canale]['q_bck'][0] = p['q_bck']
                     params[num_canale]['q_sig'][0] = p['q_sig']
                     params[num_canale]['q_tot'][0] = p['q_tot']
-                    params[num_canale]['amp_max'][0] = p['amp_max']
-                    params[num_canale]['amp_min'][0] = p['amp_min']
-                    params[num_canale]['carica'][0] = p['carica']
-                    params[num_canale]['media'][0] = p['media']
-                    params[num_canale]['pedestal'][0] = p['pedestal']
-                    params[num_canale]['dev_std'][0] = p['dev_std']
                     params[num_canale]['eff_V'][0] = p['eff_V']
                     params[num_canale]['t_eff_V'][0] = p['t_eff_V']
                     params[num_canale]['eff_Q'][0] = p['eff_Q']
