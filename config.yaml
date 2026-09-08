@@ -1,7 +1,7 @@
 # config.yaml
-# Versione: v10
-# Data ultima modifica: 2026-09-07
-# Descrizione: Configurazione con polarità segnale per efficienza corretta
+# Versione: v11
+# Data ultima modifica: 2026-09-08
+# Descrizione: Aggiunto dT=12ns per calcolo q_peak
 
 # Configurazione Analisi Forme d'Onda
 directory_principale: /mnt/hgfs/D/PreDati_Waveform/RCiccione/Cil00-Prima
@@ -30,19 +30,23 @@ sottodirectory:
   - 5800-1 5800 27.0 1006
 
 # Intervalli temporali per ogni canale (in secondi)
+# dT: tempo di integrazione per q_peak
 intervalli_temporali:
   canale_1:
     t0: -0.000000100
     tinf: -0.000000090
     tsup: 0.000000000
+    dT: 0.000000012
   canale_2:
     t0: -0.000000100
     tinf: -0.000000090
     tsup: 0.000000000
+    dT: 0.000000012
   canale_3:
     t0: -0.000000100
     tinf: -0.000000090
     tsup: -0.000000060
+    dT: 0.000000012
 
 # Polarità segnale per ogni canale
 # "positive": picco verso l'alto (vmax > 0)
