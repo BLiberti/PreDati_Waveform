@@ -1,9 +1,10 @@
 # main.py
-# Versione: v30
+# Versione: v31
 # Data ultima modifica: 2026-09-08
 # Descrizione: Efficienza basata su polarità - soglia applicata correttamente
-# v30: rimossi carica, media, pedestal, amp_max, amp_min, dev_std
-#      mantenuti: bck, bck_sig, vmax, vmin, tmax, tmin, q_bck, q_sig, q_tot
+# v31: aggiunto q_peak (integrale simmetrico del segnale intorno al picco per larghezza dT)
+#      v30: rimossi carica, media, pedestal, amp_max, amp_min, dev_std
+#      mantenuti: bck, bck_sig, vmax, vmin, tmax, tmin, q_bck, q_sig, q_tot, q_peak
 #                 eff_V, t_eff_V, eff_Q, eff_5rm, t_eff_5rm
 
 import os
@@ -118,6 +119,15 @@ class AnalizzatoreFormaOnda:
         params = self.intervalli[key]
         return params['t0'], params['tinf'], params['tsup']
     
+    def get_dT(self, canale: int) -> float:
+        """Ritorna dT (tempo di integrazione) per il canale"""
+        key = f"canale_{canale}"
+        if key not in self.intervalli:
+            return 1e-9
+        
+        params = self.intervalli[key]
+        return params.get('dT', 1e-9)
+    
     def get_soglie(self, canale: int) -> tuple:
         """Ritorna (soglia_V, soglia_Q) per il canale"""
         key = f"canale_{canale}"
@@ -146,6 +156,7 @@ class AnalizzatoreFormaOnda:
         
         # Ottieni intervalli per questo canale
         t0, tinf, tsup = self.get_intervallo(canale)
+        dT = self.get_dT(canale)
         soglia_V, soglia_Q = self.get_soglie(canale)
         Z = self.get_impedenza(canale)
         polarita = self.get_polarita(canale)
@@ -162,6 +173,7 @@ class AnalizzatoreFormaOnda:
                 'q_bck': 0.0,
                 'q_sig': 0.0,
                 'q_tot': 0.0,
+                'q_peak': 0.0,
                 'eff_V': 0.0,
                 't_eff_V': 0.0,
                 'eff_Q': 0.0,
@@ -204,6 +216,7 @@ class AnalizzatoreFormaOnda:
                 'q_bck': q_bck,
                 'q_sig': 0.0,
                 'q_tot': 0.0,
+                'q_peak': 0.0,
                 'eff_V': 0.0,
                 't_eff_V': 0.0,
                 'eff_Q': 0.0,
@@ -236,6 +249,22 @@ class AnalizzatoreFormaOnda:
             q_tot = float(np.trapz(tensione_tot_corretta, tempo_tot) / Z)
         else:
             q_tot = 0.0
+        
+        # **Q_PEAK**: integrale simmetrico del segnale intorno al picco per larghezza dT
+        q_peak = 0.0
+        if polarita == "negative":
+            # Integra intorno a tmin (vmin)
+            mask_peak = (tempo_filtrato >= tmin - dT/2) & (tempo_filtrato <= tmin + dT/2)
+            tensione_peak = tensione_corretta[mask_peak]
+            tempo_peak = tempo_filtrato[mask_peak]
+        else:  # positive
+            # Integra intorno a tmax (vmax)
+            mask_peak = (tempo_filtrato >= tmax - dT/2) & (tempo_filtrato <= tmax + dT/2)
+            tensione_peak = tensione_corretta[mask_peak]
+            tempo_peak = tempo_filtrato[mask_peak]
+        
+        if len(tempo_peak) > 1:
+            q_peak = float(np.trapz(tensione_peak, tempo_peak) / Z)
         
         # **CALCOLA EFFICIENZE E TEMPI** (considero la polarità)
         if polarita == "negative":
@@ -288,6 +317,7 @@ class AnalizzatoreFormaOnda:
             'q_bck': q_bck,
             'q_sig': q_sig,
             'q_tot': q_tot,
+            'q_peak': q_peak,
             'eff_V': eff_V,
             't_eff_V': t_eff_V,
             'eff_Q': eff_Q,
@@ -353,7 +383,7 @@ class AnalizzatoreDati:
                 self.eventi[evento_id_globale]['parametri'][canale_id] = parametri
                 
                 print(f"  ✓ Evento {evento_id_globale}, Canale {canale_id}")
-                print(f"    BCK: {parametri['bck']:.6f}±{parametri['bck_sig']:.6f}, Q_sig: {parametri['q_sig']:.3e} C, Eff_V: {parametri['eff_V']:.0f}")
+                print(f"    BCK: {parametri['bck']:.6f}±{parametri['bck_sig']:.6f}, Q_sig: {parametri['q_sig']:.3e} C, Q_peak: {parametri['q_peak']:.3e} C, Eff_V: {parametri['eff_V']:.0f}")
                 
             except Exception as e:
                 print(f"  ✗ Errore: {file_path.name}: {e}")
@@ -405,6 +435,7 @@ class AnalizzatoreDati:
                 'q_bck': np.array([0.0], dtype=np.float32),
                 'q_sig': np.array([0.0], dtype=np.float32),
                 'q_tot': np.array([0.0], dtype=np.float32),
+                'q_peak': np.array([0.0], dtype=np.float32),
                 'eff_V': np.array([0.0], dtype=np.float32),
                 't_eff_V': np.array([0.0], dtype=np.float32),
                 'eff_Q': np.array([0.0], dtype=np.float32),
@@ -464,6 +495,7 @@ class AnalizzatoreDati:
                     params[num_canale]['q_bck'][0] = p['q_bck']
                     params[num_canale]['q_sig'][0] = p['q_sig']
                     params[num_canale]['q_tot'][0] = p['q_tot']
+                    params[num_canale]['q_peak'][0] = p['q_peak']
                     params[num_canale]['eff_V'][0] = p['eff_V']
                     params[num_canale]['t_eff_V'][0] = p['t_eff_V']
                     params[num_canale]['eff_Q'][0] = p['eff_Q']
