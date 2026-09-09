@@ -1,8 +1,9 @@
 # main.py
-# Versione: v32
-# Data ultima modifica: 2026-09-08
+# Versione: v33
+# Data ultima modifica: 2026-09-09
 # Descrizione: Efficienza basata su polarità - soglia applicata correttamente
-# v32: aggiunto hveff = HV * ((273+temperatura)/293) * (1010/pressione)
+# v33: aggiunto bck_ave_run (media di bck per run) e bcksig_ave_run (media di bck_sig per run)
+#      v32: aggiunto hveff = HV * ((273+temperatura)/293) * (1010/pressione)
 #      v31: aggiunto q_peak (integrale simmetrico del segnale intorno al picco per larghezza dT)
 #      v30: rimossi carica, media, pedestal, amp_max, amp_min, dev_std
 #      mantenuti: bck, bck_sig, vmax, vmin, tmax, tmin, q_bck, q_sig, q_tot, q_peak
@@ -389,6 +390,34 @@ class AnalizzatoreDati:
             except Exception as e:
                 print(f"  ✗ Errore: {file_path.name}: {e}")
     
+    def calcola_medie_background_per_run(self):
+        """Calcola media di bck e bck_sig per ogni run e canale"""
+        medie_per_run = {}  # {(nome_run, canale): {'bck_ave': ..., 'bcksig_ave': ...}}
+        
+        for evento_id, evt in self.eventi.items():
+            nome_run = evt['descrizione_run']
+            parametri = evt['parametri']
+            
+            for canale, params in parametri.items():
+                key = (nome_run, canale)
+                if key not in medie_per_run:
+                    medie_per_run[key] = {'bck_values': [], 'bcksig_values': []}
+                
+                medie_per_run[key]['bck_values'].append(params['bck'])
+                medie_per_run[key]['bcksig_values'].append(params['bck_sig'])
+        
+        # Calcola le medie
+        medie_finali = {}
+        for key, values in medie_per_run.items():
+            bck_ave = np.mean(values['bck_values']) if values['bck_values'] else 0.0
+            bcksig_ave = np.mean(values['bcksig_values']) if values['bcksig_values'] else 0.0
+            medie_finali[key] = {
+                'bck_ave_run': float(bck_ave),
+                'bcksig_ave_run': float(bcksig_ave)
+            }
+        
+        return medie_finali
+    
     def scrivi_root(self):
         """Scrivi ROOT file usando PyROOT"""
         try:
@@ -396,6 +425,9 @@ class AnalizzatoreDati:
         except ImportError:
             print("❌ ROOT non installato. Installa con: pip install root")
             return
+        
+        # Calcola medie background per run
+        medie_background = self.calcola_medie_background_per_run()
         
         dir_principale = Path(self.config['directory_principale'])
         output_path = dir_principale / self.config['root_output']
@@ -431,6 +463,8 @@ class AnalizzatoreDati:
             params[ch] = {
                 'bck': np.array([0.0], dtype=np.float32),
                 'bck_sig': np.array([0.0], dtype=np.float32),
+                'bck_ave_run': np.array([0.0], dtype=np.float32),
+                'bcksig_ave_run': np.array([0.0], dtype=np.float32),
                 'vmax': np.array([0.0], dtype=np.float32),
                 'vmin': np.array([0.0], dtype=np.float32),
                 'tmax': np.array([0.0], dtype=np.float32),
@@ -457,6 +491,7 @@ class AnalizzatoreDati:
             canali = evt['canali']
             parametri = evt['parametri']
             evt_locale = evt['evento_locale']
+            nome_run = evt['descrizione_run']
             
             GlobalNmb[0] = global_counter
             EvtNmb[0] = evt_locale
@@ -494,6 +529,13 @@ class AnalizzatoreDati:
                     p = parametri[num_canale]
                     params[num_canale]['bck'][0] = p['bck']
                     params[num_canale]['bck_sig'][0] = p['bck_sig']
+                    
+                    # Assegna le medie per questo run e canale
+                    key = (nome_run, num_canale)
+                    if key in medie_background:
+                        params[num_canale]['bck_ave_run'][0] = medie_background[key]['bck_ave_run']
+                        params[num_canale]['bcksig_ave_run'][0] = medie_background[key]['bcksig_ave_run']
+                    
                     params[num_canale]['vmax'][0] = p['vmax']
                     params[num_canale]['vmin'][0] = p['vmin']
                     params[num_canale]['tmax'][0] = p['tmax']
