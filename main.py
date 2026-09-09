@@ -1,8 +1,9 @@
 # main.py
-# Versione: v31
+# Versione: v32
 # Data ultima modifica: 2026-09-08
 # Descrizione: Efficienza basata su polarità - soglia applicata correttamente
-# v31: aggiunto q_peak (integrale simmetrico del segnale intorno al picco per larghezza dT)
+# v32: aggiunto hveff = HV * ((273+temperatura)/293) * (1010/pressione)
+#      v31: aggiunto q_peak (integrale simmetrico del segnale intorno al picco per larghezza dT)
 #      v30: rimossi carica, media, pedestal, amp_max, amp_min, dev_std
 #      mantenuti: bck, bck_sig, vmax, vmin, tmax, tmin, q_bck, q_sig, q_tot, q_peak
 #                 eff_V, t_eff_V, eff_Q, eff_5rm, t_eff_5rm
@@ -405,6 +406,7 @@ class AnalizzatoreDati:
         GlobalNmb = np.array([0], dtype=np.int32)
         EvtNmb = np.array([0], dtype=np.int32)
         HV = np.array([0], dtype=np.float32)
+        hveff = np.array([0], dtype=np.float32)
         temperatura = np.array([0], dtype=np.float32)
         pressione = np.array([0], dtype=np.float32)
         npts = np.array([0], dtype=np.int32)
@@ -412,6 +414,7 @@ class AnalizzatoreDati:
         tree.Branch("GlobalNmb", GlobalNmb, "GlobalNmb/I")
         tree.Branch("EvtNmb", EvtNmb, "EvtNmb/I")
         tree.Branch("HV", HV, "HV/F")
+        tree.Branch("hveff", hveff, "hveff/F")
         tree.Branch("temperatura", temperatura, "temperatura/F")
         tree.Branch("pressione", pressione, "pressione/F")
         tree.Branch("npts", npts, "npts/I")
@@ -460,6 +463,9 @@ class AnalizzatoreDati:
             HV[0] = evt['HV']
             temperatura[0] = evt['temperatura']
             pressione[0] = evt['pressione']
+            
+            # Calcola hveff = HV * ((273+temperatura)/293) * (1010/pressione)
+            hveff[0] = float(evt['HV'] * ((273 + evt['temperatura']) / 293) * (1010 / evt['pressione']))
             
             tempo = None
             for cid in sorted(canali.keys()):
