@@ -75,5 +75,13 @@ impedenza:
   canale_2: 50.0
   canale_3: 50.0
 
+# Decimazione dei vettori waveform scritti in ROOT (Time<ch>, V<ch>)
+# Intero N >= 1: si tiene 1 campione ogni N (1 = nessuna decimazione)
+# Vale SOLO per i vettori ROOT, NON per l'analisi (che usa tutti i punti)
+campionamento_root:
+  canale_1: 1
+  canale_2: 1
+  canale_3: 1
+
 # Parametri ROOT
 root_output: output_analisi.root

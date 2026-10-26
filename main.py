@@ -336,7 +336,18 @@ class AnalizzatoreDati:
         self.analizzatore_onda = AnalizzatoreFormaOnda(self.config_loader.config)
         self.config = self.config_loader.config
         self.num_canali = self.config['num_canali']
+        self.decimazione_root = self.config.get('campionamento_root', {}) or {}
         self.eventi = {}
+    
+    def get_decimazione(self, canale: int) -> int:
+        """1 campione ogni N per i vettori ROOT del canale (default 1, solo ROOT)"""
+        chiave = f"canale_{canale}"
+        n = self.decimazione_root.get(chiave, 1)
+        if isinstance(n, bool) or not isinstance(n, int):
+            raise ValueError(f"campionamento_root.{chiave} deve essere un intero >= 1 (trovato {n!r})")
+        if n < 1:
+            raise ValueError(f"campionamento_root.{chiave} deve essere >= 1 (trovato {n})")
+        return n
     
     def scansiona_directory(self):
         """Scansiona subdirectory e legge file"""
@@ -441,7 +452,6 @@ class AnalizzatoreDati:
         hveff = np.array([0], dtype=np.float32)
         temperatura = np.array([0], dtype=np.float32)
         pressione = np.array([0], dtype=np.float32)
-        npts = np.array([0], dtype=np.int32)
         
         tree.Branch("GlobalNmb", GlobalNmb, "GlobalNmb/I")
         tree.Branch("EvtNmb", EvtNmb, "EvtNmb/I")
@@ -449,12 +459,20 @@ class AnalizzatoreDati:
         tree.Branch("hveff", hveff, "hveff/F")
         tree.Branch("temperatura", temperatura, "temperatura/F")
         tree.Branch("pressione", pressione, "pressione/F")
-        tree.Branch("npts", npts, "npts/I")
         tree.Branch("descrizione_run", ROOT.std.string(), "descrizione_run")
         
-        Time_vec = ROOT.std.vector("float")()
+        # Branch per canale: npts<ch> (decimati), npts_orig<ch> (originali), Time<ch>, V<ch>
+        npts = {}
+        npts_orig = {}
+        Time_vec = {}
         V_vec = {}
         for ch in range(1, self.num_canali + 1):
+            npts[ch] = np.array([0], dtype=np.int32)
+            npts_orig[ch] = np.array([0], dtype=np.int32)
+            tree.Branch(f"npts{ch}", npts[ch], f"npts{ch}/I")
+            tree.Branch(f"npts_orig{ch}", npts_orig[ch], f"npts_orig{ch}/I")
+            Time_vec[ch] = ROOT.std.vector("float")()
+            tree.Branch(f"Time{ch}", Time_vec[ch])
             V_vec[ch] = ROOT.std.vector("float")()
             tree.Branch(f"V{ch}", V_vec[ch])
         
@@ -483,8 +501,6 @@ class AnalizzatoreDati:
             for param_name, param_array in params[ch].items():
                 tree.Branch(f"{param_name}{ch}", param_array, f"{param_name}{ch}/F")
         
-        tree.Branch("Time", Time_vec)
-        
         global_counter = 0
         for evento_id in sorted(self.eventi.keys()):
             evt = self.eventi[evento_id]
@@ -502,28 +518,23 @@ class AnalizzatoreDati:
             # Calcola hveff = HV * ((273+temperatura)/293) * (1010/pressione)
             hveff[0] = float(evt['HV'] * ((273 + evt['temperatura']) / 293) * (1010 / evt['pressione']))
             
-            tempo = None
-            for cid in sorted(canali.keys()):
-                tempo = canali[cid].tempo
-                break
-            
-            Time_vec.clear()
-            for ch in range(1, self.num_canali + 1):
-                V_vec[ch].clear()
-            
-            if tempo is not None:
-                npts[0] = len(tempo)
-                for t in tempo:
-                    Time_vec.push_back(float(t))
-            
+            # Decimazione solo per i vettori ROOT: l'analisi usa tutti i punti
             for num_canale in range(1, self.num_canali + 1):
-                if num_canale in canali:
-                    tensione = canali[num_canale].tensione
-                else:
-                    tensione = np.zeros_like(tempo) if tempo is not None else np.array([])
+                Time_vec[num_canale].clear()
+                V_vec[num_canale].clear()
+                npts[num_canale][0] = 0
+                npts_orig[num_canale][0] = 0
                 
-                for v in tensione:
-                    V_vec[num_canale].push_back(float(v))
+                if num_canale in canali:
+                    step = self.get_decimazione(num_canale)
+                    tempo_dec = canali[num_canale].tempo[::step]
+                    tensione_dec = canali[num_canale].tensione[::step]
+                    npts_orig[num_canale][0] = len(canali[num_canale].tempo)
+                    npts[num_canale][0] = len(tempo_dec)
+                    for t in tempo_dec:
+                        Time_vec[num_canale].push_back(float(t))
+                    for v in tensione_dec:
+                        V_vec[num_canale].push_back(float(v))
                 
                 if num_canale in parametri:
                     p = parametri[num_canale]
