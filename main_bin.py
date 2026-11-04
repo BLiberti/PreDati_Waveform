@@ -1,0 +1,735 @@
+# main_bin.py
+# Versione: v42
+# Data ultima modifica: 2026-11-04
+# Descrizione: RunNumber, descrizione_run, polarità numerica per canale,
+# ID fisici dei canali ricavati dal config e decimazione ROOT per canale.
+# L'analisi usa tutti i punti originali; la decimazione si applica solo
+# ai vettori waveform scritti nel file ROOT.
+
+import os
+import yaml
+import numpy as np
+from pathlib import Path
+from dataclasses import dataclass
+from typing import Dict
+import warnings
+
+warnings.filterwarnings('ignore')
+
+
+@dataclass
+class EventoParams:
+    """Classe per memorizzare parametri evento."""
+    numero_evento: int
+    HV: float
+    temperatura: float
+    pressione: float
+    descrizione_run: str
+
+
+@dataclass
+class FormaOnda:
+    """Classe per memorizzare forma d'onda singolo canale."""
+    tempo: np.ndarray
+    tensione: np.ndarray
+    canale: int
+    evento: int
+
+
+class ConfigLoader:
+    """Carica configurazione YAML."""
+
+    def __init__(self, config_path: str):
+        with open(config_path, 'r') as f:
+            self.config = yaml.safe_load(f)
+        self._parse_sottodirectory()
+
+    def _parse_sottodirectory(self):
+        """Parsa sottodirectory dal formato string."""
+        sottodirectory_parsed = []
+
+        for subdir_entry in self.config['sottodirectory']:
+            if isinstance(subdir_entry, str):
+                parts = subdir_entry.split()
+                if len(parts) != 4:
+                    raise ValueError(f"Formato non valido: '{subdir_entry}'")
+
+                sottodirectory_parsed.append({
+                    'nome': parts[0],
+                    'HV': float(parts[1]),
+                    'temperatura': float(parts[2]),
+                    'pressione': float(parts[3])
+                })
+            else:
+                sottodirectory_parsed.append(subdir_entry)
+
+        self.config['sottodirectory'] = sottodirectory_parsed
+
+
+class DataReader:
+    """Legge file dati."""
+
+    def __init__(self, config: ConfigLoader):
+        self.formato = config.config['formato_dati']
+
+    def estrai_canale_evento(self, filename: str) -> tuple:
+        """Estrae canale e numero evento dal formato CX--XX--YYYYY.txt."""
+        nome_senza_ext = Path(filename).stem
+        parts = nome_senza_ext.split('--')
+        canale = int(parts[0][1:])
+        evento = int(parts[2])
+        return canale, evento
+
+    def leggi_file_text(self, filepath: str) -> FormaOnda:
+        """Legge file testo LeCroy."""
+        filename = Path(filepath).name
+        canale, evento = self.estrai_canale_evento(filename)
+        dati = np.loadtxt(filepath, skiprows=5, delimiter=',')
+        tempo = dati[:, 0]
+        tensione = dati[:, 1]
+        return FormaOnda(tempo, tensione, canale, evento)
+
+    def leggi_file_binary(self, filepath: str) -> FormaOnda:
+        """Legge file binario."""
+        filename = Path(filepath).name
+        canale, evento = self.estrai_canale_evento(filename)
+        dati = np.fromfile(filepath, dtype=np.float32)
+        n_punti = len(dati) // 2
+        tempo = dati[:n_punti]
+        tensione = dati[n_punti:]
+        return FormaOnda(tempo, tensione, canale, evento)
+
+    def leggi_file(self, filepath: str) -> FormaOnda:
+        if self.formato == 'text':
+            return self.leggi_file_text(filepath)
+        elif self.formato == 'binary':
+            return self.leggi_file_binary(filepath)
+        else:
+            raise ValueError(f"Formato non supportato: {self.formato}")
+
+
+class AnalizzatoreFormaOnda:
+    """Analizza le forme d'onda ed estrae parametri."""
+
+    def __init__(self, config: Dict):
+        self.intervalli = config.get('intervalli_temporali', {})
+        self.soglie = config.get('soglie_efficienza', {})
+        self.impedenza = config.get('impedenza', {})
+        self.polarita = config.get('polarita', {})
+
+    def get_intervallo(self, canale: int) -> tuple:
+        """Ritorna (t0, tinf, tsup) per il canale."""
+        key = f"canale_{canale}"
+        if key not in self.intervalli:
+            return None, None, None
+
+        params = self.intervalli[key]
+        return params['t0'], params['tinf'], params['tsup']
+
+    def get_dT(self, canale: int) -> float:
+        """Ritorna dT (tempo di integrazione) per il canale."""
+        key = f"canale_{canale}"
+        if key not in self.intervalli:
+            return 1e-9
+
+        params = self.intervalli[key]
+        return params.get('dT', 1e-9)
+
+    def get_soglie(self, canale: int) -> tuple:
+        """Ritorna (soglia_V, soglia_Q) per il canale."""
+        key = f"canale_{canale}"
+        if key not in self.soglie:
+            return None, None
+
+        params = self.soglie[key]
+        return params['soglia_V'], params['soglia_Q']
+
+    def get_impedenza(self, canale: int) -> float:
+        """Ritorna l'impedenza per il canale."""
+        key = f"canale_{canale}"
+        return self.impedenza.get(key, 1.0)
+
+    def get_polarita(self, canale: int) -> str:
+        """Ritorna la polarità configurata per il canale."""
+        key = f"canale_{canale}"
+        return self.polarita.get(key, "positive")
+
+    def get_segno_polarita(self, canale: int) -> int:
+        """Ritorna -1 per negative e +1 per positive."""
+        polarita = self.get_polarita(canale)
+        if polarita == "negative":
+            return -1
+        if polarita == "positive":
+            return 1
+        raise ValueError(
+            f"Polarità non valida per canale_{canale}: {polarita!r}. "
+            "Valori ammessi: 'positive' o 'negative'."
+        )
+
+    def calcola_parametri(self, forma_onda: FormaOnda) -> Dict:
+        """Calcola i parametri usando tutti i punti della forma d'onda."""
+
+        tempo = forma_onda.tempo
+        tensione = forma_onda.tensione
+        canale = forma_onda.canale
+
+        # Ottieni intervalli e parametri per questo canale.
+        t0, tinf, tsup = self.get_intervallo(canale)
+        dT = self.get_dT(canale)
+        soglia_V, soglia_Q = self.get_soglie(canale)
+        Z = self.get_impedenza(canale)
+        polarita = self.get_polarita(canale)
+
+        # Se non ci sono intervalli, ritorna valori neutri.
+        if t0 is None or tinf is None or tsup is None:
+            return {
+                'bck': 0.0,
+                'bck_sig': 0.0,
+                'vmax': 0.0,
+                'vmin': 0.0,
+                'tmax': 0.0,
+                'tmin': 0.0,
+                'q_bck': 0.0,
+                'q_sig': 0.0,
+                'q_tot': 0.0,
+                'q_peak': 0.0,
+                'eff_V': 0.0,
+                't_eff_V': 0.0,
+                'eff_Q': 0.0,
+                'eff_5rm': 0.0,
+                't_eff_5rm': 0.0,
+            }
+
+        # BACKGROUND: intervallo [t0, tinf].
+        mask_bck = (tempo >= t0) & (tempo <= tinf)
+        tensione_bck = tensione[mask_bck]
+        tempo_bck = tempo[mask_bck]
+
+        if len(tensione_bck) > 0:
+            bck = float(np.mean(tensione_bck))
+            bck_sig = float(np.std(tensione_bck))
+        else:
+            bck = 0.0
+            bck_sig = 0.0
+
+        # CARICA BACKGROUND: tra t0 e tinf, dopo sottrazione di bck, divisa per Z.
+        tensione_bck_corretta = tensione_bck - bck
+        if len(tempo_bck) > 1:
+            q_bck = float(np.trapz(tensione_bck_corretta, tempo_bck) / Z)
+        else:
+            q_bck = 0.0
+
+        # SEGNALE: intervallo [tinf, tsup].
+        mask_sig = (tempo >= tinf) & (tempo <= tsup)
+        tensione_filtrata = tensione[mask_sig]
+        tempo_filtrato = tempo[mask_sig]
+
+        if len(tensione_filtrata) == 0:
+            return {
+                'bck': bck,
+                'bck_sig': bck_sig,
+                'vmax': 0.0,
+                'vmin': 0.0,
+                'tmax': 0.0,
+                'tmin': 0.0,
+                'q_bck': q_bck,
+                'q_sig': 0.0,
+                'q_tot': 0.0,
+                'q_peak': 0.0,
+                'eff_V': 0.0,
+                't_eff_V': 0.0,
+                'eff_Q': 0.0,
+                'eff_5rm': 0.0,
+                't_eff_5rm': 0.0,
+            }
+
+        # Sottrai background dal segnale.
+        tensione_corretta = tensione_filtrata - bck
+
+        # Vmax e Vmin sul segnale corretto.
+        vmax = float(np.max(tensione_corretta))
+        vmin = float(np.min(tensione_corretta))
+
+        # Tempi associati a Vmax e Vmin.
+        idx_vmax = int(np.argmax(tensione_corretta))
+        idx_vmin = int(np.argmin(tensione_corretta))
+        tmax = float(tempo_filtrato[idx_vmax])
+        tmin = float(tempo_filtrato[idx_vmin])
+
+        # CARICA SEGNALE: tra tinf e tsup, dopo sottrazione di bck, divisa per Z.
+        q_sig = float(np.trapz(tensione_corretta, tempo_filtrato) / Z)
+
+        # CARICA TOTALE: da tinf alla fine della finestra temporale.
+        mask_tot = tempo >= tinf
+        tensione_tot = tensione[mask_tot]
+        tempo_tot = tempo[mask_tot]
+        tensione_tot_corretta = tensione_tot - bck
+        if len(tempo_tot) > 1:
+            q_tot = float(np.trapz(tensione_tot_corretta, tempo_tot) / Z)
+        else:
+            q_tot = 0.0
+
+        # Q_PEAK: integrale intorno al picco per larghezza dT.
+        q_peak = 0.0
+        if polarita == "negative":
+            mask_peak = (
+                (tempo_filtrato >= tmin - dT / 2)
+                & (tempo_filtrato <= tmin + dT / 2)
+            )
+        else:
+            mask_peak = (
+                (tempo_filtrato >= tmax - dT / 2)
+                & (tempo_filtrato <= tmax + dT / 2)
+            )
+
+        tensione_peak = tensione_corretta[mask_peak]
+        tempo_peak = tempo_filtrato[mask_peak]
+        if len(tempo_peak) > 1:
+            q_peak = float(np.trapz(tensione_peak, tempo_peak) / Z)
+
+        # Calcolo efficienze e tempi considerando la polarità.
+        if polarita == "negative":
+            eff_V = 1.0 if (vmin < -soglia_V) else 0.0
+            t_eff_V = 0.0
+            if eff_V > 0.5:
+                idx_sorpasso = np.where(tensione_corretta < -soglia_V)[0]
+                if len(idx_sorpasso) > 0:
+                    t_eff_V = float(tempo_filtrato[idx_sorpasso[0]])
+
+            eff_Q = 1.0 if (abs(q_sig) > soglia_Q) else 0.0
+
+            soglia_5rm = 5.0 * bck_sig
+            eff_5rm = 1.0 if (vmin < -soglia_5rm) else 0.0
+            t_eff_5rm = 0.0
+            if eff_5rm > 0.5:
+                idx_sorpasso_5rm = np.where(
+                    tensione_corretta < -soglia_5rm
+                )[0]
+                if len(idx_sorpasso_5rm) > 0:
+                    t_eff_5rm = float(tempo_filtrato[idx_sorpasso_5rm[0]])
+        else:
+            eff_V = 1.0 if (vmax > soglia_V) else 0.0
+            t_eff_V = 0.0
+            if eff_V > 0.5:
+                idx_sorpasso = np.where(tensione_corretta > soglia_V)[0]
+                if len(idx_sorpasso) > 0:
+                    t_eff_V = float(tempo_filtrato[idx_sorpasso[0]])
+
+            eff_Q = 1.0 if (q_sig > soglia_Q) else 0.0
+
+            soglia_5rm = 5.0 * bck_sig
+            eff_5rm = 1.0 if (vmax > soglia_5rm) else 0.0
+            t_eff_5rm = 0.0
+            if eff_5rm > 0.5:
+                idx_sorpasso_5rm = np.where(
+                    tensione_corretta > soglia_5rm
+                )[0]
+                if len(idx_sorpasso_5rm) > 0:
+                    t_eff_5rm = float(tempo_filtrato[idx_sorpasso_5rm[0]])
+
+        return {
+            'bck': bck,
+            'bck_sig': bck_sig,
+            'vmax': vmax,
+            'vmin': vmin,
+            'tmax': tmax,
+            'tmin': tmin,
+            'q_bck': q_bck,
+            'q_sig': q_sig,
+            'q_tot': q_tot,
+            'q_peak': q_peak,
+            'eff_V': eff_V,
+            't_eff_V': t_eff_V,
+            'eff_Q': eff_Q,
+            'eff_5rm': eff_5rm,
+            't_eff_5rm': t_eff_5rm,
+        }
+
+
+class AnalizzatoreDati:
+    """Orchestratore principale."""
+
+    def __init__(self, config_path: str):
+        self.config_loader = ConfigLoader(config_path)
+        self.data_reader = DataReader(self.config_loader)
+        self.analizzatore_onda = AnalizzatoreFormaOnda(
+            self.config_loader.config
+        )
+        self.config = self.config_loader.config
+        self.num_canali = self.config['num_canali']
+
+        # Ricava gli ID fisici dalle sezioni del config.
+        # Esempio: canale_1, canale_2, canale_4 -> [1, 2, 4].
+        sezioni_canali = (
+            'intervalli_temporali',
+            'soglie_efficienza',
+            'impedenza',
+            'polarita',
+            'campionamento_root',
+        )
+
+        canali_configurati = set()
+        for nome_sezione in sezioni_canali:
+            sezione = self.config.get(nome_sezione, {}) or {}
+            for chiave in sezione:
+                prefisso = 'canale_'
+                if chiave.startswith(prefisso):
+                    suffisso = chiave[len(prefisso):]
+                    if suffisso.isdigit():
+                        canali_configurati.add(int(suffisso))
+
+        if not canali_configurati:
+            raise ValueError(
+                "Non ho trovato ID di canale nelle sezioni del config."
+            )
+
+        self.canali_configurati = sorted(canali_configurati)
+
+        # Ordinale dei run, a partire da 1 e rispettando l'ordine nel config.
+        self.numero_run = {
+            subdir['nome']: indice
+            for indice, subdir in enumerate(
+                self.config['sottodirectory'], start=1
+            )
+        }
+
+        # Decimazione applicata solo ai vettori scritti nel ROOT.
+        self.decimazione_root = self.config.get(
+            'campionamento_root', {}
+        ) or {}
+        self.eventi = {}
+
+    def get_decimazione(self, canale: int) -> int:
+        """Ritorna N per salvare un campione ogni N; default N=1."""
+        key = f"canale_{canale}"
+        valore = self.decimazione_root.get(key, 1)
+
+        if isinstance(valore, bool):
+            raise ValueError(
+                f"Valore non valido per campionamento_root.{key}: "
+                f"{valore!r}; deve essere un intero >= 1"
+            )
+
+        if isinstance(valore, int):
+            n = valore
+        elif isinstance(valore, str):
+            try:
+                n = int(valore.strip())
+            except ValueError as exc:
+                raise ValueError(
+                    f"Valore non valido per campionamento_root.{key}: "
+                    f"{valore!r}; deve essere un intero >= 1"
+                ) from exc
+        else:
+            raise ValueError(
+                f"Valore non valido per campionamento_root.{key}: "
+                f"{valore!r}; deve essere un intero >= 1"
+            )
+
+        if n < 1:
+            raise ValueError(
+                f"Valore non valido per campionamento_root.{key}: {n}; "
+                "deve essere >= 1"
+            )
+        return n
+
+    def scansiona_directory(self):
+        """Scansiona sottodirectory e legge i file."""
+        dir_principale = Path(self.config['directory_principale'])
+
+        for subdir_config in self.config['sottodirectory']:
+            nome_subdir = subdir_config['nome']
+            subdir_path = dir_principale / nome_subdir
+
+            if not subdir_path.exists():
+                print(f"⚠️  Subdirectory non trovata: {subdir_path}")
+                continue
+
+            print(f"📂 Scansione: {nome_subdir}")
+            self._processa_subdirectory(subdir_path, subdir_config)
+
+    def _processa_subdirectory(self, subdir_path: Path, subdir_config: Dict):
+        """Processa una singola sottodirectory."""
+        nome_run = subdir_config['nome']
+
+        for file_path in subdir_path.glob('*.txt'):
+            try:
+                forma_onda = self.data_reader.leggi_file(str(file_path))
+                evento_id_locale = forma_onda.evento
+                canale_id = forma_onda.canale
+                evento_id_globale = f"{nome_run}_{evento_id_locale:03d}"
+
+                if evento_id_globale not in self.eventi:
+                    self.eventi[evento_id_globale] = {
+                        'canali': {},
+                        'parametri': {},
+                        'evento_locale': evento_id_locale,
+                        'numero_run': self.numero_run[nome_run],
+                        'HV': subdir_config['HV'],
+                        'temperatura': subdir_config['temperatura'],
+                        'pressione': subdir_config['pressione'],
+                        'descrizione_run': nome_run,
+                    }
+
+                # Conserva la forma d'onda originale.
+                self.eventi[evento_id_globale]['canali'][canale_id] = forma_onda
+
+                # L'analisi usa tutti i punti originali, senza decimazione.
+                parametri = self.analizzatore_onda.calcola_parametri(forma_onda)
+                self.eventi[evento_id_globale]['parametri'][canale_id] = parametri
+
+                print(f"  ✓ Evento {evento_id_globale}, Canale {canale_id}")
+                print(
+                    f"    BCK: {parametri['bck']:.6f}±"
+                    f"{parametri['bck_sig']:.6f}, "
+                    f"Q_sig: {parametri['q_sig']:.3e} C, "
+                    f"Q_peak: {parametri['q_peak']:.3e} C, "
+                    f"Eff_V: {parametri['eff_V']:.0f}"
+                )
+
+            except Exception as e:
+                print(f"  ✗ Errore: {file_path.name}: {e}")
+
+    def calcola_medie_background_per_run(self):
+        """Calcola media di bck e bck_sig per ogni run e canale."""
+        medie_per_run = {}
+
+        for evt in self.eventi.values():
+            nome_run = evt['descrizione_run']
+            parametri = evt['parametri']
+
+            for canale, params in parametri.items():
+                key = (nome_run, canale)
+                if key not in medie_per_run:
+                    medie_per_run[key] = {
+                        'bck_values': [],
+                        'bcksig_values': [],
+                    }
+
+                medie_per_run[key]['bck_values'].append(params['bck'])
+                medie_per_run[key]['bcksig_values'].append(params['bck_sig'])
+
+        medie_finali = {}
+        for key, values in medie_per_run.items():
+            bck_ave = (
+                np.mean(values['bck_values'])
+                if values['bck_values'] else 0.0
+            )
+            bcksig_ave = (
+                np.mean(values['bcksig_values'])
+                if values['bcksig_values'] else 0.0
+            )
+            medie_finali[key] = {
+                'bck_ave_run': float(bck_ave),
+                'bcksig_ave_run': float(bcksig_ave),
+            }
+
+        return medie_finali
+
+    def scrivi_root(self):
+        """Scrive il file ROOT usando PyROOT."""
+        try:
+            import ROOT
+        except ImportError:
+            print("❌ ROOT non installato. Installa PyROOT nel tuo ambiente.")
+            return
+
+        medie_background = self.calcola_medie_background_per_run()
+        dir_principale = Path(self.config['directory_principale'])
+        output_path = dir_principale / self.config['root_output']
+
+        root_file = ROOT.TFile(str(output_path), "RECREATE")
+        tree = ROOT.TTree(
+            "events",
+            "Dati forme d'onda con parametri e efficienze"
+        )
+
+        GlobalNmb = np.array([0], dtype=np.int32)
+        EvtNmb = np.array([0], dtype=np.int32)
+        RunNumber = np.array([0], dtype=np.int32)
+        HV = np.array([0], dtype=np.float32)
+        hveff = np.array([0], dtype=np.float32)
+        temperatura = np.array([0], dtype=np.float32)
+        pressione = np.array([0], dtype=np.float32)
+
+        tree.Branch("GlobalNmb", GlobalNmb, "GlobalNmb/I")
+        tree.Branch("EvtNmb", EvtNmb, "EvtNmb/I")
+        tree.Branch("RunNumber", RunNumber, "RunNumber/I")
+        tree.Branch("HV", HV, "HV/F")
+        tree.Branch("hveff", hveff, "hveff/F")
+        tree.Branch("temperatura", temperatura, "temperatura/F")
+        tree.Branch("pressione", pressione, "pressione/F")
+
+        descrizione_run = ROOT.std.string()
+        tree.Branch("descrizione_run", descrizione_run)
+
+        # Vettori, conteggi e polarità per ID fisico del canale.
+        Time_vec = {}
+        V_vec = {}
+        npts = {}
+        npts_orig = {}
+        pol = {}
+
+        for ch in self.canali_configurati:
+            Time_vec[ch] = ROOT.std.vector("float")()
+            V_vec[ch] = ROOT.std.vector("float")()
+            npts[ch] = np.array([0], dtype=np.int32)
+            npts_orig[ch] = np.array([0], dtype=np.int32)
+            pol[ch] = np.array([0], dtype=np.int32)
+
+            tree.Branch(f"Time{ch}", Time_vec[ch])
+            tree.Branch(f"V{ch}", V_vec[ch])
+            tree.Branch(f"npts{ch}", npts[ch], f"npts{ch}/I")
+            tree.Branch(
+                f"npts_orig{ch}",
+                npts_orig[ch],
+                f"npts_orig{ch}/I"
+            )
+            tree.Branch(f"pol{ch}", pol[ch], f"pol{ch}/I")
+
+        params = {}
+        for ch in self.canali_configurati:
+            params[ch] = {
+                'bck': np.array([0.0], dtype=np.float32),
+                'bck_sig': np.array([0.0], dtype=np.float32),
+                'bck_ave_run': np.array([0.0], dtype=np.float32),
+                'bcksig_ave_run': np.array([0.0], dtype=np.float32),
+                'vmax': np.array([0.0], dtype=np.float32),
+                'vmin': np.array([0.0], dtype=np.float32),
+                'tmax': np.array([0.0], dtype=np.float32),
+                'tmin': np.array([0.0], dtype=np.float32),
+                'q_bck': np.array([0.0], dtype=np.float32),
+                'q_sig': np.array([0.0], dtype=np.float32),
+                'q_tot': np.array([0.0], dtype=np.float32),
+                'q_peak': np.array([0.0], dtype=np.float32),
+                'eff_V': np.array([0.0], dtype=np.float32),
+                't_eff_V': np.array([0.0], dtype=np.float32),
+                'eff_Q': np.array([0.0], dtype=np.float32),
+                'eff_5rm': np.array([0.0], dtype=np.float32),
+                't_eff_5rm': np.array([0.0], dtype=np.float32),
+            }
+
+            for param_name, param_array in params[ch].items():
+                tree.Branch(
+                    f"{param_name}{ch}",
+                    param_array,
+                    f"{param_name}{ch}/F"
+                )
+
+        global_counter = 0
+
+        for evento_id in sorted(self.eventi.keys()):
+            evt = self.eventi[evento_id]
+            canali = evt['canali']
+            parametri = evt['parametri']
+            nome_run = evt['descrizione_run']
+
+            GlobalNmb[0] = global_counter
+            EvtNmb[0] = evt['evento_locale']
+            RunNumber[0] = evt['numero_run']
+            HV[0] = evt['HV']
+            temperatura[0] = evt['temperatura']
+            pressione[0] = evt['pressione']
+
+            # Calcola hveff = HV * ((273+temperatura)/293) * (1010/pressione).
+            hveff[0] = float(
+                evt['HV']
+                * ((273 + evt['temperatura']) / 293)
+                * (1010 / evt['pressione'])
+            )
+
+            # Nome esatto del run come appare nel config.
+            descrizione_run.assign(str(nome_run))
+
+            # Polarità per canale: negative=-1, positive=+1.
+            for ch in self.canali_configurati:
+                pol[ch][0] = self.analizzatore_onda.get_segno_polarita(ch)
+
+                Time_vec[ch].clear()
+                V_vec[ch].clear()
+                npts[ch][0] = 0
+                npts_orig[ch][0] = 0
+
+            # Decimazione indipendente per canale, solo per la scrittura ROOT.
+            for ch in self.canali_configurati:
+                if ch in canali:
+                    forma_onda = canali[ch]
+                    tempo = forma_onda.tempo
+                    tensione = forma_onda.tensione
+
+                    if len(tempo) != len(tensione):
+                        raise ValueError(
+                            f"Evento {evento_id}, canale {ch}: "
+                            "tempo e tensione hanno lunghezze diverse"
+                        )
+
+                    step = self.get_decimazione(ch)
+                    tempo_dec = tempo[::step]
+                    tensione_dec = tensione[::step]
+
+                    npts_orig[ch][0] = len(tempo)
+                    npts[ch][0] = len(tempo_dec)
+
+                    for t in tempo_dec:
+                        Time_vec[ch].push_back(float(t))
+                    for v in tensione_dec:
+                        V_vec[ch].push_back(float(v))
+
+                if ch in parametri:
+                    p = parametri[ch]
+                    params[ch]['bck'][0] = p['bck']
+                    params[ch]['bck_sig'][0] = p['bck_sig']
+
+                    key = (nome_run, ch)
+                    if key in medie_background:
+                        params[ch]['bck_ave_run'][0] = (
+                            medie_background[key]['bck_ave_run']
+                        )
+                        params[ch]['bcksig_ave_run'][0] = (
+                            medie_background[key]['bcksig_ave_run']
+                        )
+                    else:
+                        params[ch]['bck_ave_run'][0] = 0.0
+                        params[ch]['bcksig_ave_run'][0] = 0.0
+
+                    params[ch]['vmax'][0] = p['vmax']
+                    params[ch]['vmin'][0] = p['vmin']
+                    params[ch]['tmax'][0] = p['tmax']
+                    params[ch]['tmin'][0] = p['tmin']
+                    params[ch]['q_bck'][0] = p['q_bck']
+                    params[ch]['q_sig'][0] = p['q_sig']
+                    params[ch]['q_tot'][0] = p['q_tot']
+                    params[ch]['q_peak'][0] = p['q_peak']
+                    params[ch]['eff_V'][0] = p['eff_V']
+                    params[ch]['t_eff_V'][0] = p['t_eff_V']
+                    params[ch]['eff_Q'][0] = p['eff_Q']
+                    params[ch]['eff_5rm'][0] = p['eff_5rm']
+                    params[ch]['t_eff_5rm'][0] = p['t_eff_5rm']
+                else:
+                    # Canale assente: parametri impostati a zero.
+                    for param_name in params[ch]:
+                        params[ch][param_name][0] = 0.0
+
+            tree.Fill()
+            global_counter += 1
+
+        tree.Write()
+        root_file.Close()
+        print(f"\n✅ ROOT file salvato: {output_path}")
+
+    def esegui_analisi_completa(self):
+        """Esegue la pipeline completa."""
+        print("🚀 Inizio analisi...")
+        self.scansiona_directory()
+        print(f"\n📊 Trovati {len(self.eventi)} eventi")
+        self.scrivi_root()
+
+
+def main():
+    config_path = "config_bin.yaml"
+    analizzatore = AnalizzatoreDati(config_path)
+    analizzatore.esegui_analisi_completa()
+
+
+if __name__ == "__main__":
+    main()
