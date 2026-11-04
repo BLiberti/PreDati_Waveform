@@ -1,8 +1,8 @@
 # main.py
-# Versione: v33
-# Data ultima modifica: 2026-09-09
-# Descrizione: Efficienza basata su polarità - soglia applicata correttamente
-# v33: aggiunto bck_ave_run (media di bck per run) e bcksig_ave_run (media di bck_sig per run)
+# Versione: v34
+# Descrizione: v34: decimazione ROOT per canale (campionamento_root), polarità pol1..N (+1/-1),
+#      descrizione_run e RunNumber (ordinale 1-based del run in sottodirectory del config)
+#      v33: aggiunto bck_ave_run e bcksig_ave_run
 #      v32: aggiunto hveff = HV * ((273+temperatura)/293) * (1010/pressione)
 #      v31: aggiunto q_peak (integrale simmetrico del segnale intorno al picco per larghezza dT)
 #      v30: rimossi carica, media, pedestal, amp_max, amp_min, dev_std
@@ -328,236 +328,274 @@ class AnalizzatoreFormaOnda:
         }
 
 class AnalizzatoreDati:
-    """Orchestratore principale"""
-    
+    """Coordina lettura, analisi e scrittura dei dati."""
+
     def __init__(self, config_path: str):
         self.config_loader = ConfigLoader(config_path)
         self.data_reader = DataReader(self.config_loader)
         self.analizzatore_onda = AnalizzatoreFormaOnda(self.config_loader.config)
         self.config = self.config_loader.config
         self.num_canali = self.config['num_canali']
+
+        # Ordinale dei run (da 1) secondo la posizione in sottodirectory nel config.
+        self.numero_run = {
+            voce['nome']: indice
+            for indice, voce in enumerate(self.config['sottodirectory'], start=1)
+        }
+
+        # Decimazione usata solo per i vettori scritti nel file ROOT.
+        self.decimazione_root = self.config.get('campionamento_root', {}) or {}
         self.eventi = {}
-    
+
+    def get_decimazione(self, canale: int) -> int:
+        """Ritorna N per salvare un campione ogni N nel ROOT; default N=1."""
+        key = f"canale_{canale}"
+        raw_value = self.decimazione_root.get(key, 1)
+
+        errore = (
+            f"Valore non valido per campionamento_root.{key}: "
+            f"{raw_value!r}; deve essere un intero >= 1"
+        )
+        if isinstance(raw_value, bool):
+            raise ValueError(errore)
+        if isinstance(raw_value, int):
+            n = raw_value
+        elif isinstance(raw_value, str):
+            try:
+                n = int(raw_value.strip())
+            except ValueError as exc:
+                raise ValueError(errore) from exc
+        else:
+            raise ValueError(errore)
+
+        if n < 1:
+            raise ValueError(errore)
+        return n
+
     def scansiona_directory(self):
         """Scansiona subdirectory e legge file"""
         dir_principale = Path(self.config['directory_principale'])
-        
+
         for subdir_config in self.config['sottodirectory']:
             nome_subdir = subdir_config['nome']
             subdir_path = dir_principale / nome_subdir
-            
+
             if not subdir_path.exists():
                 print(f"⚠️  Subdirectory non trovata: {subdir_path}")
                 continue
-            
+
             print(f"📂 Scansione: {nome_subdir}")
             self._processa_subdirectory(subdir_path, subdir_config)
-    
+
     def _processa_subdirectory(self, subdir_path: Path, subdir_config: Dict):
-        """Processa una singola subdirectory"""
-        
+        """Processa una singola sottodirectory"""
         nome_run = subdir_config['nome']
-        
-        for file_path in subdir_path.glob('*.txt'):
+
+        for file_path in subdir_path.glob("*.txt"):
             try:
                 forma_onda = self.data_reader.leggi_file(str(file_path))
                 evento_id_locale = forma_onda.evento
                 canale_id = forma_onda.canale
-                
                 evento_id_globale = f"{nome_run}_{evento_id_locale:03d}"
-                
+
                 if evento_id_globale not in self.eventi:
                     self.eventi[evento_id_globale] = {
                         'canali': {},
                         'parametri': {},
                         'evento_locale': evento_id_locale,
+                        'numero_run': self.numero_run[nome_run],
                         'HV': subdir_config['HV'],
                         'temperatura': subdir_config['temperatura'],
                         'pressione': subdir_config['pressione'],
-                        'descrizione_run': subdir_config['nome']
+                        'descrizione_run': nome_run
                     }
-                
-                # Salva la forma d'onda
+
                 self.eventi[evento_id_globale]['canali'][canale_id] = forma_onda
-                
-                # Calcola i parametri
+
+                # L'analisi usa tutti i punti, senza decimazione.
                 parametri = self.analizzatore_onda.calcola_parametri(forma_onda)
                 self.eventi[evento_id_globale]['parametri'][canale_id] = parametri
-                
+
                 print(f"  ✓ Evento {evento_id_globale}, Canale {canale_id}")
-                print(f"    BCK: {parametri['bck']:.6f}±{parametri['bck_sig']:.6f}, Q_sig: {parametri['q_sig']:.3e} C, Q_peak: {parametri['q_peak']:.3e} C, Eff_V: {parametri['eff_V']:.0f}")
-                
+                print(f"    BCK: {parametri['bck']:.6f}±{parametri['bck_sig']:.6f}, "
+                      f"Q_sig: {parametri['q_sig']:.3e} C, "
+                      f"Q_peak: {parametri['q_peak']:.3e} C, "
+                      f"Eff_V: {parametri['eff_V']:.0f}")
+
             except Exception as e:
                 print(f"  ✗ Errore: {file_path.name}: {e}")
-    
+
     def calcola_medie_background_per_run(self):
-        """Calcola media di bck e bck_sig per ogni run e canale"""
-        medie_per_run = {}  # {(nome_run, canale): {'bck_ave': ..., 'bcksig_ave': ...}}
-        
-        for evento_id, evt in self.eventi.items():
+        """Calcola le medie di bck e bck_sig per ogni run e canale"""
+        medie_per_run = {}
+
+        for evt in self.eventi.values():
             nome_run = evt['descrizione_run']
-            parametri = evt['parametri']
-            
-            for canale, params in parametri.items():
+            for canale, params in evt['parametri'].items():
                 key = (nome_run, canale)
                 if key not in medie_per_run:
                     medie_per_run[key] = {'bck_values': [], 'bcksig_values': []}
-                
                 medie_per_run[key]['bck_values'].append(params['bck'])
                 medie_per_run[key]['bcksig_values'].append(params['bck_sig'])
-        
-        # Calcola le medie
+
         medie_finali = {}
         for key, values in medie_per_run.items():
-            bck_ave = np.mean(values['bck_values']) if values['bck_values'] else 0.0
-            bcksig_ave = np.mean(values['bcksig_values']) if values['bcksig_values'] else 0.0
             medie_finali[key] = {
-                'bck_ave_run': float(bck_ave),
-                'bcksig_ave_run': float(bcksig_ave)
+                'bck_ave_run': float(np.mean(values['bck_values'])) if values['bck_values'] else 0.0,
+                'bcksig_ave_run': float(np.mean(values['bcksig_values'])) if values['bcksig_values'] else 0.0,
             }
-        
         return medie_finali
-    
+
     def scrivi_root(self):
-        """Scrivi ROOT file usando PyROOT"""
+        """Scrive file ROOT usando PyROOT"""
         try:
             import ROOT
         except ImportError:
-            print("❌ ROOT non installato. Installa con: pip install root")
+            print("❌ ROOT non installato. Installa PyROOT nel tuo ambiente.")
             return
-        
-        # Calcola medie background per run
+
         medie_background = self.calcola_medie_background_per_run()
-        
         dir_principale = Path(self.config['directory_principale'])
         output_path = dir_principale / self.config['root_output']
-        
+
         root_file = ROOT.TFile(str(output_path), "RECREATE")
         tree = ROOT.TTree("events", "Dati forme d'onda con parametri e efficienze")
-        
+
         GlobalNmb = np.array([0], dtype=np.int32)
         EvtNmb = np.array([0], dtype=np.int32)
+        RunNumber = np.array([0], dtype=np.int32)
         HV = np.array([0], dtype=np.float32)
         hveff = np.array([0], dtype=np.float32)
         temperatura = np.array([0], dtype=np.float32)
         pressione = np.array([0], dtype=np.float32)
-        npts = np.array([0], dtype=np.int32)
-        
+
         tree.Branch("GlobalNmb", GlobalNmb, "GlobalNmb/I")
         tree.Branch("EvtNmb", EvtNmb, "EvtNmb/I")
+        tree.Branch("RunNumber", RunNumber, "RunNumber/I")
         tree.Branch("HV", HV, "HV/F")
         tree.Branch("hveff", hveff, "hveff/F")
         tree.Branch("temperatura", temperatura, "temperatura/F")
         tree.Branch("pressione", pressione, "pressione/F")
-        tree.Branch("npts", npts, "npts/I")
-        tree.Branch("descrizione_run", ROOT.std.string(), "descrizione_run")
-        
-        Time_vec = ROOT.std.vector("float")()
+
+        descrizione_run = ROOT.std.string()
+        tree.Branch("descrizione_run", descrizione_run)
+
+        # Vettori, conteggi e polarità per canale
+        Time_vec = {}
         V_vec = {}
+        npts = {}
+        npts_orig = {}
+        pol = {}
+
         for ch in range(1, self.num_canali + 1):
+            Time_vec[ch] = ROOT.std.vector("float")()
             V_vec[ch] = ROOT.std.vector("float")()
+            npts[ch] = np.array([0], dtype=np.int32)
+            npts_orig[ch] = np.array([0], dtype=np.int32)
+            pol[ch] = np.array([0], dtype=np.int32)
+
+            tree.Branch(f"Time{ch}", Time_vec[ch])
             tree.Branch(f"V{ch}", V_vec[ch])
-        
+            tree.Branch(f"npts{ch}", npts[ch], f"npts{ch}/I")
+            tree.Branch(f"npts_orig{ch}", npts_orig[ch], f"npts_orig{ch}/I")
+            tree.Branch(f"pol{ch}", pol[ch], f"pol{ch}/I")
+
         params = {}
         for ch in range(1, self.num_canali + 1):
             params[ch] = {
-                'bck': np.array([0.0], dtype=np.float32),
-                'bck_sig': np.array([0.0], dtype=np.float32),
-                'bck_ave_run': np.array([0.0], dtype=np.float32),
-                'bcksig_ave_run': np.array([0.0], dtype=np.float32),
-                'vmax': np.array([0.0], dtype=np.float32),
-                'vmin': np.array([0.0], dtype=np.float32),
-                'tmax': np.array([0.0], dtype=np.float32),
-                'tmin': np.array([0.0], dtype=np.float32),
-                'q_bck': np.array([0.0], dtype=np.float32),
-                'q_sig': np.array([0.0], dtype=np.float32),
-                'q_tot': np.array([0.0], dtype=np.float32),
-                'q_peak': np.array([0.0], dtype=np.float32),
-                'eff_V': np.array([0.0], dtype=np.float32),
-                't_eff_V': np.array([0.0], dtype=np.float32),
-                'eff_Q': np.array([0.0], dtype=np.float32),
-                'eff_5rm': np.array([0.0], dtype=np.float32),
-                't_eff_5rm': np.array([0.0], dtype=np.float32),
+                name: np.array([0.0], dtype=np.float32)
+                for name in (
+                    'bck', 'bck_sig', 'bck_ave_run', 'bcksig_ave_run',
+                    'vmax', 'vmin', 'tmax', 'tmin',
+                    'q_bck', 'q_sig', 'q_tot', 'q_peak',
+                    'eff_V', 't_eff_V', 'eff_Q', 'eff_5rm', 't_eff_5rm',
+                )
             }
-            
             for param_name, param_array in params[ch].items():
                 tree.Branch(f"{param_name}{ch}", param_array, f"{param_name}{ch}/F")
-        
-        tree.Branch("Time", Time_vec)
-        
+
         global_counter = 0
+
         for evento_id in sorted(self.eventi.keys()):
             evt = self.eventi[evento_id]
             canali = evt['canali']
             parametri = evt['parametri']
-            evt_locale = evt['evento_locale']
             nome_run = evt['descrizione_run']
-            
+
             GlobalNmb[0] = global_counter
-            EvtNmb[0] = evt_locale
+            EvtNmb[0] = evt['evento_locale']
+            RunNumber[0] = evt['numero_run']
             HV[0] = evt['HV']
             temperatura[0] = evt['temperatura']
             pressione[0] = evt['pressione']
-            
-            # Calcola hveff = HV * ((273+temperatura)/293) * (1010/pressione)
             hveff[0] = float(evt['HV'] * ((273 + evt['temperatura']) / 293) * (1010 / evt['pressione']))
-            
-            tempo = None
-            for cid in sorted(canali.keys()):
-                tempo = canali[cid].tempo
-                break
-            
-            Time_vec.clear()
+
+            descrizione_run.assign(str(nome_run))
+
             for ch in range(1, self.num_canali + 1):
-                V_vec[ch].clear()
-            
-            if tempo is not None:
-                npts[0] = len(tempo)
-                for t in tempo:
-                    Time_vec.push_back(float(t))
-            
-            for num_canale in range(1, self.num_canali + 1):
-                if num_canale in canali:
-                    tensione = canali[num_canale].tensione
+                polarita = self.analizzatore_onda.get_polarita(ch)
+                if polarita == "positive":
+                    pol[ch][0] = 1
+                elif polarita == "negative":
+                    pol[ch][0] = -1
                 else:
-                    tensione = np.zeros_like(tempo) if tempo is not None else np.array([])
-                
-                for v in tensione:
-                    V_vec[num_canale].push_back(float(v))
-                
-                if num_canale in parametri:
-                    p = parametri[num_canale]
-                    params[num_canale]['bck'][0] = p['bck']
-                    params[num_canale]['bck_sig'][0] = p['bck_sig']
-                    
-                    # Assegna le medie per questo run e canale
-                    key = (nome_run, num_canale)
+                    raise ValueError(
+                        f"Polarità non valida per il canale {ch}: {polarita!r}"
+                    )
+
+                Time_vec[ch].clear()
+                V_vec[ch].clear()
+                npts[ch][0] = 0
+                npts_orig[ch][0] = 0
+
+            for ch in range(1, self.num_canali + 1):
+                if ch in canali:
+                    forma_onda = canali[ch]
+                    tempo = forma_onda.tempo
+                    tensione = forma_onda.tensione
+
+                    if len(tempo) != len(tensione):
+                        raise ValueError(
+                            f"Evento {evento_id}, canale {ch}: "
+                            "tempo e tensione hanno lunghezze diverse"
+                        )
+
+                    step = self.get_decimazione(ch)
+                    tempo_dec = tempo[::step]
+                    tensione_dec = tensione[::step]
+
+                    npts_orig[ch][0] = len(tempo)
+                    npts[ch][0] = len(tempo_dec)
+
+                    for t in tempo_dec:
+                        Time_vec[ch].push_back(float(t))
+                    for v in tensione_dec:
+                        V_vec[ch].push_back(float(v))
+
+                if ch in parametri:
+                    p = parametri[ch]
+                    key = (nome_run, ch)
                     if key in medie_background:
-                        params[num_canale]['bck_ave_run'][0] = medie_background[key]['bck_ave_run']
-                        params[num_canale]['bcksig_ave_run'][0] = medie_background[key]['bcksig_ave_run']
-                    
-                    params[num_canale]['vmax'][0] = p['vmax']
-                    params[num_canale]['vmin'][0] = p['vmin']
-                    params[num_canale]['tmax'][0] = p['tmax']
-                    params[num_canale]['tmin'][0] = p['tmin']
-                    params[num_canale]['q_bck'][0] = p['q_bck']
-                    params[num_canale]['q_sig'][0] = p['q_sig']
-                    params[num_canale]['q_tot'][0] = p['q_tot']
-                    params[num_canale]['q_peak'][0] = p['q_peak']
-                    params[num_canale]['eff_V'][0] = p['eff_V']
-                    params[num_canale]['t_eff_V'][0] = p['t_eff_V']
-                    params[num_canale]['eff_Q'][0] = p['eff_Q']
-                    params[num_canale]['eff_5rm'][0] = p['eff_5rm']
-                    params[num_canale]['t_eff_5rm'][0] = p['t_eff_5rm']
-            
+                        params[ch]['bck_ave_run'][0] = medie_background[key]['bck_ave_run']
+                        params[ch]['bcksig_ave_run'][0] = medie_background[key]['bcksig_ave_run']
+                    for param_name in (
+                        'bck', 'bck_sig', 'vmax', 'vmin', 'tmax', 'tmin',
+                        'q_bck', 'q_sig', 'q_tot', 'q_peak',
+                        'eff_V', 't_eff_V', 'eff_Q', 'eff_5rm', 't_eff_5rm',
+                    ):
+                        params[ch][param_name][0] = p[param_name]
+                else:
+                    for param_array in params[ch].values():
+                        param_array[0] = 0.0
+
             tree.Fill()
             global_counter += 1
-        
+
         tree.Write()
         root_file.Close()
-        
+
         print(f"\n✅ ROOT file salvato: {output_path}")
-    
+
     def esegui_analisi_completa(self):
         """Esegui pipeline completa"""
         print("🚀 Inizio analisi...")
