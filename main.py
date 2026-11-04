@@ -149,6 +149,18 @@ class AnalizzatoreFormaOnda:
         key = f"canale_{canale}"
         return self.polarita.get(key, "positive")
     
+    def get_segno_polarita(self, canale: int) -> int:
+        """Ritorna -1 per polarità negative, +1 per positive; errore altrimenti"""
+        polarita = self.get_polarita(canale)
+        if polarita == "negative":
+            return -1
+        if polarita == "positive":
+            return 1
+        raise ValueError(
+            f"Polarità non valida per canale_{canale}: {polarita!r} "
+            f"(valori ammessi: 'negative', 'positive')"
+        )
+    
     def calcola_parametri(self, forma_onda: FormaOnda) -> Dict:
         """Calcola parametri della forma d'onda nel suo intervallo temporale"""
         
@@ -484,6 +496,11 @@ class AnalizzatoreDati:
                 tree.Branch(f"{param_name}{ch}", param_array, f"{param_name}{ch}/F")
         
         tree.Branch("Time", Time_vec)
+        
+        pol = {}
+        for ch in range(1, self.num_canali + 1):
+            pol[ch] = np.array([self.get_segno_polarita(ch)], dtype=np.int32)
+            tree.Branch(f"pol{ch}", pol[ch], f"pol{ch}/I")
         
         global_counter = 0
         for evento_id in sorted(self.eventi.keys()):
