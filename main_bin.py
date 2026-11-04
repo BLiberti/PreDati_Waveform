@@ -1,5 +1,5 @@
 # main_bin.py
-# Versione: v42
+# Versione: v43
 # Data ultima modifica: 2026-11-04
 # Descrizione: RunNumber, descrizione_run, polarità numerica per canale,
 # ID fisici dei canali ricavati dal config e decimazione ROOT per canale.
@@ -7,6 +7,7 @@
 # ai vettori waveform scritti nel file ROOT.
 
 import os
+import struct
 import yaml
 import numpy as np
 from pathlib import Path
@@ -71,9 +72,19 @@ class DataReader:
 
     def __init__(self, config: ConfigLoader):
         self.formato = config.config['formato_dati']
+        if self.formato not in ('text', 'byte', 'word'):
+            raise ValueError(
+                f"Formato non supportato: {self.formato!r}. "
+                "Valori ammessi: 'text', 'byte' o 'word'."
+            )
+
+    @property
+    def estensione_file(self) -> str:
+        """Estensione dei file waveform prevista dal formato selezionato."""
+        return '.txt' if self.formato == 'text' else '.trc'
 
     def estrai_canale_evento(self, filename: str) -> tuple:
-        """Estrae canale e numero evento dal formato CX--XX--YYYYY.txt."""
+        """Estrae canale e numero evento dal nome CX--XX--YYYYY."""
         nome_senza_ext = Path(filename).stem
         parts = nome_senza_ext.split('--')
         canale = int(parts[0][1:])
@@ -89,23 +100,135 @@ class DataReader:
         tensione = dati[:, 1]
         return FormaOnda(tempo, tensione, canale, evento)
 
-    def leggi_file_binary(self, filepath: str) -> FormaOnda:
-        """Legge file binario."""
+    def leggi_file_lecroy(self, filepath: str) -> FormaOnda:
+        """Decodifica un file LeCroy .trc WAVEDESC in unità SI."""
         filename = Path(filepath).name
         canale, evento = self.estrai_canale_evento(filename)
-        dati = np.fromfile(filepath, dtype=np.float32)
-        n_punti = len(dati) // 2
-        tempo = dati[:n_punti]
-        tensione = dati[n_punti:]
+
+        dati = Path(filepath).read_bytes()
+        desc_start = dati.find(b'WAVEDESC')
+        if desc_start < 0:
+            raise ValueError("descrittore WAVEDESC non trovato")
+        if desc_start + 36 > len(dati):
+            raise ValueError("WAVEDESC incompleto: manca COMM_ORDER")
+        if desc_start + 40 > len(dati):
+            raise ValueError("WAVEDESC incompleto: manca WAVE_DESCRIPTOR")
+
+        comm_order = dati[desc_start + 34:desc_start + 36]
+        if comm_order == b'\x00\x00':
+            byte_order = '>'
+        elif comm_order == b'\x01\x00':
+            byte_order = '<'
+        else:
+            raise ValueError(
+                f"COMM_ORDER non supportato o non valido: {comm_order!r}"
+            )
+
+        def unpack(fmt: str, offset: int):
+            return struct.unpack_from(
+                byte_order + fmt, dati, desc_start + offset
+            )[0]
+
+        comm_type = unpack('h', 32)
+        expected_comm_type = {'byte': 0, 'word': 1}[self.formato]
+        if comm_type != expected_comm_type:
+            raise ValueError(
+                f"COMM_TYPE={comm_type}, ma formato_dati={self.formato!r} "
+                f"richiede COMM_TYPE={expected_comm_type}"
+            )
+
+        wave_descriptor_len = unpack('i', 36)
+        if wave_descriptor_len < 188:
+            raise ValueError(
+                f"WAVE_DESCRIPTOR troppo corto: {wave_descriptor_len} byte"
+            )
+        if desc_start + wave_descriptor_len > len(dati):
+            raise ValueError("WAVEDESC oltre la fine del file")
+
+        user_text_len = unpack('i', 40)
+        reserved_desc_len = unpack('i', 44)
+        trigtime_array_len = unpack('i', 48)
+        ris_time_array_len = unpack('i', 52)
+        reserved_array1_len = unpack('i', 56)
+        wave_array1_len = unpack('i', 60)
+        block_lengths = (
+            user_text_len,
+            reserved_desc_len,
+            trigtime_array_len,
+            ris_time_array_len,
+            reserved_array1_len,
+            wave_array1_len,
+        )
+        if any(length < 0 for length in block_lengths):
+            raise ValueError("WAVEDESC contiene una lunghezza di blocco negativa")
+
+        wave_array_start = (
+            desc_start
+            + wave_descriptor_len
+            + user_text_len
+            + reserved_desc_len
+            + trigtime_array_len
+            + ris_time_array_len
+            + reserved_array1_len
+        )
+        wave_array_end = wave_array_start + wave_array1_len
+        if wave_array_start > len(dati) or wave_array_end > len(dati):
+            raise ValueError("WAVE_ARRAY_1 oltre i limiti del file")
+
+        bytes_per_sample = 1 if self.formato == 'byte' else 2
+        if wave_array1_len == 0 or wave_array1_len % bytes_per_sample:
+            raise ValueError(
+                "WAVE_ARRAY_1 vuoto o con lunghezza non divisibile per "
+                f"{bytes_per_sample}"
+            )
+        sample_count = wave_array1_len // bytes_per_sample
+        wave_array_count = unpack('i', 116)
+        if wave_array_count != sample_count:
+            raise ValueError(
+                f"WAVE_ARRAY_COUNT={wave_array_count} non corrisponde a "
+                f"{sample_count} campioni in WAVE_ARRAY_1"
+            )
+
+        first_valid = unpack('i', 124)
+        last_valid = unpack('i', 128)
+        if not (0 <= first_valid <= last_valid < sample_count):
+            raise ValueError(
+                "FIRST_VALID_PNT/LAST_VALID_PNT fuori dai limiti "
+                f"dell'array: {first_valid}, {last_valid}, {sample_count}"
+            )
+
+        sample_dtype = (
+            np.dtype('i1') if self.formato == 'byte'
+            else np.dtype(f'{byte_order}i2')
+        )
+        samples = np.frombuffer(
+            dati,
+            dtype=sample_dtype,
+            count=sample_count,
+            offset=wave_array_start,
+        )
+        samples = samples[first_valid:last_valid + 1].astype(np.float64)
+
+        vertical_gain = unpack('f', 156)
+        vertical_offset = unpack('f', 160)
+        horiz_interval = unpack('f', 176)
+        horiz_offset = unpack('d', 180)
+        if not all(np.isfinite(value) for value in (
+            vertical_gain, vertical_offset, horiz_interval, horiz_offset
+        )):
+            raise ValueError("WAVEDESC contiene scale non finite")
+        if horiz_interval <= 0:
+            raise ValueError(f"HORIZ_INTERVAL non valido: {horiz_interval}")
+
+        point_indices = np.arange(first_valid, last_valid + 1)
+        tempo = horiz_offset + point_indices * horiz_interval
+        tensione = samples * vertical_gain - vertical_offset
         return FormaOnda(tempo, tensione, canale, evento)
 
     def leggi_file(self, filepath: str) -> FormaOnda:
         if self.formato == 'text':
             return self.leggi_file_text(filepath)
-        elif self.formato == 'binary':
-            return self.leggi_file_binary(filepath)
-        else:
-            raise ValueError(f"Formato non supportato: {self.formato}")
+        return self.leggi_file_lecroy(filepath)
 
 
 class AnalizzatoreFormaOnda:
@@ -452,7 +575,7 @@ class AnalizzatoreDati:
         """Processa una singola sottodirectory."""
         nome_run = subdir_config['nome']
 
-        for file_path in subdir_path.glob('*.txt'):
+        for file_path in subdir_path.glob(f'*{self.data_reader.estensione_file}'):
             try:
                 forma_onda = self.data_reader.leggi_file(str(file_path))
                 evento_id_locale = forma_onda.evento
