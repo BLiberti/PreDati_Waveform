@@ -337,6 +337,22 @@ class AnalizzatoreDati:
         self.config = self.config_loader.config
         self.num_canali = self.config['num_canali']
         self.eventi = {}
+        
+        # Ordinale (da 1) dei run nell'ordine di config 'sottodirectory'
+        self.numero_run = {
+            voce['nome']: i
+            for i, voce in enumerate(self.config['sottodirectory'], start=1)
+        }
+        
+        # Decimazione solo per i vettori scritti in ROOT (default: nessuna)
+        self.decimazione_root = self.config.get('campionamento_root', {}) or {}
+    
+    def get_decimazione(self, canale: int) -> int:
+        """Ritorna N: salva un campione ogni N nel ROOT (default 1)"""
+        n = int(self.decimazione_root.get(f"canale_{canale}", 1))
+        if n < 1:
+            raise ValueError(f"campionamento_root.canale_{canale} deve essere >= 1")
+        return n
     
     def scansiona_directory(self):
         """Scansiona subdirectory e legge file"""
@@ -371,6 +387,7 @@ class AnalizzatoreDati:
                         'canali': {},
                         'parametri': {},
                         'evento_locale': evento_id_locale,
+                        'numero_run': self.numero_run[nome_run],
                         'HV': subdir_config['HV'],
                         'temperatura': subdir_config['temperatura'],
                         'pressione': subdir_config['pressione'],
@@ -441,7 +458,7 @@ class AnalizzatoreDati:
         hveff = np.array([0], dtype=np.float32)
         temperatura = np.array([0], dtype=np.float32)
         pressione = np.array([0], dtype=np.float32)
-        npts = np.array([0], dtype=np.int32)
+        RunNumber = np.array([0], dtype=np.int32)
         
         tree.Branch("GlobalNmb", GlobalNmb, "GlobalNmb/I")
         tree.Branch("EvtNmb", EvtNmb, "EvtNmb/I")
@@ -449,14 +466,23 @@ class AnalizzatoreDati:
         tree.Branch("hveff", hveff, "hveff/F")
         tree.Branch("temperatura", temperatura, "temperatura/F")
         tree.Branch("pressione", pressione, "pressione/F")
-        tree.Branch("npts", npts, "npts/I")
-        tree.Branch("descrizione_run", ROOT.std.string(), "descrizione_run")
+        tree.Branch("RunNumber", RunNumber, "RunNumber/I")
+        descrizione_run = ROOT.std.string()
+        tree.Branch("descrizione_run", descrizione_run)
         
-        Time_vec = ROOT.std.vector("float")()
+        Time_vec = {}
         V_vec = {}
+        npts = {}
+        npts_orig = {}
         for ch in range(1, self.num_canali + 1):
+            Time_vec[ch] = ROOT.std.vector("float")()
             V_vec[ch] = ROOT.std.vector("float")()
+            npts[ch] = np.array([0], dtype=np.int32)
+            npts_orig[ch] = np.array([0], dtype=np.int32)
+            tree.Branch(f"Time{ch}", Time_vec[ch])
             tree.Branch(f"V{ch}", V_vec[ch])
+            tree.Branch(f"npts{ch}", npts[ch], f"npts{ch}/I")
+            tree.Branch(f"npts_orig{ch}", npts_orig[ch], f"npts_orig{ch}/I")
         
         params = {}
         for ch in range(1, self.num_canali + 1):
@@ -483,8 +509,6 @@ class AnalizzatoreDati:
             for param_name, param_array in params[ch].items():
                 tree.Branch(f"{param_name}{ch}", param_array, f"{param_name}{ch}/F")
         
-        tree.Branch("Time", Time_vec)
-        
         global_counter = 0
         for evento_id in sorted(self.eventi.keys()):
             evt = self.eventi[evento_id]
@@ -502,28 +526,27 @@ class AnalizzatoreDati:
             # Calcola hveff = HV * ((273+temperatura)/293) * (1010/pressione)
             hveff[0] = float(evt['HV'] * ((273 + evt['temperatura']) / 293) * (1010 / evt['pressione']))
             
-            tempo = None
-            for cid in sorted(canali.keys()):
-                tempo = canali[cid].tempo
-                break
-            
-            Time_vec.clear()
-            for ch in range(1, self.num_canali + 1):
-                V_vec[ch].clear()
-            
-            if tempo is not None:
-                npts[0] = len(tempo)
-                for t in tempo:
-                    Time_vec.push_back(float(t))
+            RunNumber[0] = evt['numero_run']
+            descrizione_run.assign(str(nome_run))
             
             for num_canale in range(1, self.num_canali + 1):
-                if num_canale in canali:
-                    tensione = canali[num_canale].tensione
-                else:
-                    tensione = np.zeros_like(tempo) if tempo is not None else np.array([])
+                Time_vec[num_canale].clear()
+                V_vec[num_canale].clear()
+                npts[num_canale][0] = 0
+                npts_orig[num_canale][0] = 0
                 
-                for v in tensione:
-                    V_vec[num_canale].push_back(float(v))
+                if num_canale in canali:
+                    tempo = canali[num_canale].tempo
+                    tensione = canali[num_canale].tensione
+                    step = self.get_decimazione(num_canale)
+                    npts_orig[num_canale][0] = len(tempo)
+                    tempo_dec = tempo[::step]
+                    tensione_dec = tensione[::step]
+                    npts[num_canale][0] = len(tempo_dec)
+                    for t in tempo_dec:
+                        Time_vec[num_canale].push_back(float(t))
+                    for v in tensione_dec:
+                        V_vec[num_canale].push_back(float(v))
                 
                 if num_canale in parametri:
                     p = parametri[num_canale]
