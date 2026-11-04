@@ -1,0 +1,86 @@
+# config_ascii.yaml
+# Versione: v0
+# Data ultima modifica: 2026-11-04
+# Descrizione: Decimazione ROOT per-canale + npts_orig per-canale
+
+# Configurazione Analisi Forme d'Onda
+directory_principale: /mnt/hgfs/D/PreDati_Waveform/RCiccione-Up/Cil00NewTerzaQuarta/HVmeno
+
+# Numero di canali
+num_canali: 3
+
+# Formato file dati
+formato_dati: text  # oppure 'binary'
+
+# Sottodirectory con parametri
+sottodirectory:
+
+  - hvmeno-4500 4500 24 1003
+  - hvmeno-4700 4700 23.5 1003
+  - hvmeno-4900 4900 23.5 1003
+  - hvmeno-5100 5100 23.5 1003
+  - hvmeno-5300 5300 23.5 1003
+  - hvmeno-5400 5400 22 998
+  - hvmeno-5500 5500 23.5 1004
+  - hvmeno-5700 5700 23.5 1004
+  - hvmeno-5900 5900 24 1004
+  - hvmeno-6100 6100 24 1004
+  - hvmeno-6300 6300 24 1004
+
+# Intervalli temporali per ogni canale (in secondi)
+# dT: tempo di integrazione per q_peak
+intervalli_temporali:
+  canale_1:
+    t0: -0.000000080
+    tinf: -0.000000060
+    tsup: -0.000000030
+    dT: 0.000000012 # 12 ns
+  canale_2:
+    t0: -0.000000080
+    tinf: -0.000000060
+    tsup: -0.000000030
+    dT: 0.000000012 # 12 ns
+  canale_4:
+    t0: -0.000000080
+    tinf: -0.000000020
+    tsup: -0.000000010
+    dT: 0.000000012 # 12 ns
+
+# Polarità segnale per ogni canale
+# "positive": picco verso l'alto (vmax > 0)
+# "negative": picco verso il basso (vmin < 0)
+polarita:
+  canale_1: positive
+  canale_2: negative
+  canale_4: negative
+
+
+# Soglie di efficienza per ogni canale (valori assoluti)
+# La polarità viene applicata automaticamente nel calcolo
+soglie_efficienza:
+  canale_1: # RCCione Strip UP 
+    soglia_V: 0.002  # 2 mV
+    soglia_Q: 0.0000000000001  # 0.1 pC
+  canale_2: # RCCione Strip DOWN (corretta) 
+    soglia_V: 0.002  # 2 mV
+    soglia_Q: 0.0000000000001  # 0.1 pC
+  canale_4: # Trigger
+    soglia_V: 100 # 100 mV
+    soglia_Q: 0.000000001  # 1 nC
+
+# Impedenza di ingresso per ogni canale (Ohm)
+impedenza:
+  canale_1: 50.0
+  canale_2: 50.0
+  canale_4: 50.0
+
+# Parametri ROOT
+root_output: output_meno_analisi.root
+
+# Decimazione SOLO per i vettori forma d'onda salvati nel ROOT.
+# L'analisi dei parametri usa SEMPRE tutti i punti originali.
+# Significato: 1 campione ogni N.
+campionamento_root:
+  canale_1: 2
+  canale_2: 2
+  canale_4: 4
