@@ -1,6 +1,6 @@
 # config_bin.yaml
-# Versione: v12
-# Data ultima modifica: 2026-10-26
+# Versione: v13
+# Data ultima modifica: 2026-11-04
 # Descrizione: Decimazione ROOT per-canale + npts_orig per-canale
 
 # Configurazione Analisi Forme d'Onda
@@ -10,7 +10,7 @@ directory_principale: /mnt/hgfs/D/PreDati_Waveform/RCiccione-Up/Cil00NewTerzaQua
 num_canali: 3
 
 # Formato file dati
-formato_dati: text  # oppure 'binary'
+formato_dati: text  # Valori ammessi: text (.txt), byte (.trc, COMM_TYPE=0), word (.trc, COMM_TYPE=1)
 
 # Sottodirectory con parametri
 sottodirectory:
